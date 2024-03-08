@@ -1,143 +1,250 @@
 import streamlit as st
-import mysql.connector
-from PIL import Image
-import io
 import easyocr
-import numpy as np
+from PIL import Image
+import cv2
+import re
+import mysql.connector as sql
+import os
+import matplotlib.pyplot as plt
+import pandas as pd
 
-# Connect to MySQL database
-conn = mysql.connector.connect(
-    host="localhost",
-    user="root",
-    password="0000",
-    database="bizcard"
-)
-cursor = conn.cursor()
+# INITIALIZING THE EasyOCR READER
+reader = easyocr.Reader(['en'])
 
-# Function to create table if not exists
-def create_table():
-    cursor.execute('''CREATE TABLE IF NOT EXISTS business_cards
-                      (id INT AUTO_INCREMENT PRIMARY KEY,
-                       image LONGBLOB,
-                       company_name VARCHAR(255),
-                       card_holder_name VARCHAR(255),
-                       designation VARCHAR(255),
-                       mobile_number VARCHAR(20),
-                       email_address VARCHAR(255),
-                       website_url VARCHAR(255),
-                       area VARCHAR(255),
-                       city VARCHAR(255),
-                       state VARCHAR(255),
-                       pin_code VARCHAR(20))''')
+# CONNECTING WITH MYSQL DATABASE
+mydb = sql.connect(host="localhost",
+                   user="root",
+                   password="0000",
+                   database= "bizcard"
+                  )
+mycursor = mydb.cursor(buffered=True)
 
-# Function to insert data into database
-def insert_data(image, company_name, card_holder_name, designation, mobile_number, email_address, website_url, area, city, state, pin_code):
-    sql = '''INSERT INTO business_cards (image, company_name, card_holder_name, designation, mobile_number, email_address, website_url, area, city, state, pin_code)
-             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)'''
-    val = (image, company_name, card_holder_name, designation, mobile_number, email_address, website_url, area, city, state, pin_code)
-    cursor.execute(sql, val)
-    conn.commit()
+# TABLE CREATION
+mycursor.execute('''CREATE TABLE IF NOT EXISTS card_data
+                   (id INTEGER PRIMARY KEY AUTO_INCREMENT,
+                    company_name TEXT,
+                    card_holder TEXT,
+                    designation TEXT,
+                    mobile_number VARCHAR(50),
+                    email TEXT,
+                    website TEXT,
+                    area TEXT,
+                    city TEXT,
+                    state TEXT,
+                    pin_code VARCHAR(10),
+                    image LONGBLOB
+                    )''')
 
-# Function to display data from database
-def display_data():
-    cursor.execute("SELECT * FROM business_cards")
-    data = cursor.fetchall()
-    for entry in data:
-        st.write(f"ID: {entry[0]}")
-        st.write(f"Company Name: {entry[2]}")
-        st.write(f"Card Holder Name: {entry[3]}")
-        st.write(f"Designation: {entry[4]}")
-        st.write(f"Mobile Number: {entry[5]}")
-        st.write(f"Email Address: {entry[6]}")
-        st.write(f"Website URL: {entry[7]}")
-        st.write(f"Area: {entry[8]}")
-        st.write(f"City: {entry[9]}")
-        st.write(f"State: {entry[10]}")
-        st.write(f"Pin Code: {entry[11]}")
-        st.write("---")
+# UPLOAD AND EXTRACT MENU
+selected = st.selectbox("Select Menu", ["Upload & Extract", "Modify"])
 
-# Function to delete data from database
-def delete_data(id):
-    sql = "DELETE FROM business_cards WHERE id = %s"
-    val = (id,)
-    cursor.execute(sql, val)
-    conn.commit()
+if selected == "Upload & Extract":
+    st.markdown("### Upload a Business Card")
+    uploaded_card = st.file_uploader("upload here",label_visibility="collapsed",type=["png","jpeg","jpg"])
+        
+    if uploaded_card is not None:
+        
+        def save_card(uploaded_card):
+            with open(os.path.join("uploaded_cards",uploaded_card.name), "wb") as f:
+                f.write(uploaded_card.getbuffer())   
+        save_card(uploaded_card)
+        
+        def image_preview(image,res): 
+            for (bbox, text, prob) in res: 
+              # unpack the bounding box
+                (tl, tr, br, bl) = bbox
+                tl = (int(tl[0]), int(tl[1]))
+                tr = (int(tr[0]), int(tr[1]))
+                br = (int(br[0]), int(br[1]))
+                bl = (int(bl[0]), int(bl[1]))
+                cv2.rectangle(image, tl, br, (0, 255, 0), 2)
+                cv2.putText(image, text, (tl[0], tl[1] - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 0), 2)
+            plt.rcParams['figure.figsize'] = (15,15)
+            plt.axis('off')
+            plt.imshow(image)
+        
+        # DISPLAYING THE UPLOADED CARD
+        col1,col2 = st.columns(2,gap="large")
+        with col1:
+            st.markdown("#     ")
+            st.markdown("#     ")
+            st.markdown("### You have uploaded the card")
+            st.image(uploaded_card)
+        # DISPLAYING THE CARD WITH HIGHLIGHTS
+        with col2:
+            st.markdown("#     ")
+            st.markdown("#     ")
+            with st.spinner("Please wait processing image..."):
+                st.set_option('deprecation.showPyplotGlobalUse', False)
+                saved_img = os.getcwd()+ "\\" + "uploaded_cards"+ "\\"+ uploaded_card.name
+                image = cv2.imread(saved_img)
+                res = reader.readtext(saved_img)
+                st.markdown("### Image Processed and Data Extracted")
+                st.pyplot(image_preview(image,res))  
+                
+            
+        #easy OCR
+        saved_img = os.getcwd()+ "\\" + "uploaded_cards"+ "\\"+ uploaded_card.name
+        result = reader.readtext(saved_img,detail = 0,paragraph=False)
+        
+        # CONVERTING IMAGE TO BINARY TO UPLOAD TO SQL DATABASE
+        def img_to_binary(file):
+            # Convert image data to binary format
+            with open(file, 'rb') as file:
+                binaryData = file.read()
+            return binaryData
+        
+        data = {"company_name" : [],
+                "card_holder" : [],
+                "designation" : [],
+                "mobile_number" :[],
+                "email" : [],
+                "website" : [],
+                "area" : [],
+                "city" : [],
+                "state" : [],
+                "pin_code" : [],
+                "image" : img_to_binary(saved_img)
+               }
 
-# Function to convert PIL image to numpy array
-def pil_to_np_array(image):
-    return np.array(image)
+        def get_data(res):
+            for ind,i in enumerate(res):
 
-# Main function
-def main():
-    st.title("Business Card Information Extractor")
-    st.sidebar.title("Options")
+                # To get WEBSITE_URL
+                if "www " in i.lower() or "www." in i.lower():
+                    data["website"].append(i)
+                elif "WWW" in i:
+                    data["website"] = res[4] +"." + res[5]
 
-    # Upload image
-    uploaded_image = st.sidebar.file_uploader("Upload Business Card Image", type=["jpg", "png", "jpeg"])
+                # To get EMAIL ID
+                elif "@" in i:
+                    data["email"].append(i)
 
-    if uploaded_image is not None:
-        image = Image.open(uploaded_image)
-        st.image(image, caption="Uploaded Image", use_column_width=True)
+                # To get MOBILE NUMBER
+                elif "-" in i:
+                    data["mobile_number"].append(i)
+                    if len(data["mobile_number"]) ==2:
+                        data["mobile_number"] = " & ".join(data["mobile_number"])
 
-        # Convert image to numpy array
-        image_np = pil_to_np_array(image)
+                # To get COMPANY NAME  
+                elif ind == len(res)-1:
+                    data["company_name"].append(i)
 
-        # Perform OCR
-        reader = easyocr.Reader(['en'])
-        result = reader.readtext(image_np)
+                # To get CARD HOLDER NAME
+                elif ind == 0:
+                    data["card_holder"].append(i)
 
-        # Extract information
-        company_name = ""
-        card_holder_name = ""
-        designation = ""
-        mobile_number = ""
-        email_address = ""
-        website_url = ""
-        area = ""
-        city = ""
-        state = ""
-        pin_code = ""
+                # To get DESIGNATION
+                elif ind == 1:
+                    data["designation"].append(i)
 
-        for detection in result:
-            text = detection[1]
-            if "company" in text.lower():
-                company_name = text
-            elif "name" in text.lower():
-                card_holder_name = text
-            elif "designation" in text.lower():
-                designation = text
-            elif "mobile" in text.lower():
-                mobile_number = text
-            elif "@" in text:
-                email_address = text
-            # Similar logic for other fields...
+                # To get AREA
+                if re.findall('^[0-9].+, [a-zA-Z]+',i):
+                    data["area"].append(i.split(',')[0])
+                elif re.findall('[0-9] [a-zA-Z]+',i):
+                    data["area"].append(i)
 
-        # Display extracted information
-        st.subheader("Extracted Information")
-        st.write(f"Company Name: {company_name}")
-        st.write(f"Card Holder Name: {card_holder_name}")
-        st.write(f"Designation: {designation}")
-        st.write(f"Mobile Number: {mobile_number}")
-        st.write(f"Email Address: {email_address}")
-        # Similar display for other fields...
+                # To get CITY NAME
+                match1 = re.findall('.+St , ([a-zA-Z]+).+', i)
+                match2 = re.findall('.+St,, ([a-zA-Z]+).+', i)
+                match3 = re.findall('^[E].*',i)
+                if match1:
+                    data["city"].append(match1[0])
+                elif match2:
+                    data["city"].append(match2[0])
+                elif match3:
+                    data["city"].append(match3[0])
 
-        # Save to database
-        if st.button("Save to Database"):
-            image_byte_array = io.BytesIO()
-            image.save(image_byte_array, format='PNG')
-            image_byte_array = image_byte_array.getvalue()
-            insert_data(image_byte_array, company_name, card_holder_name, designation, mobile_number, email_address, website_url, area, city, state, pin_code)
+                # To get STATE
+                state_match = re.findall('[a-zA-Z]{9} +[0-9]',i)
+                if state_match:
+                     data["state"].append(i[:9])
+                elif re.findall('^[0-9].+, ([a-zA-Z]+);',i):
+                    data["state"].append(i.split()[-1])
+                if len(data["state"])== 2:
+                    data["state"].pop(0)
 
-    # Display database entries
-    display_data()
+                # To get PINCODE        
+                if len(i)>=6 and i.isdigit():
+                    data["pin_code"].append(i)
+                elif re.findall('[a-zA-Z]{9} +[0-9]',i):
+                    data["pin_code"].append(i[10:])
+        get_data(result)
+        
+        #FUNCTION TO CREATE DATAFRAME
+        def create_df(data):
+            df = pd.DataFrame(data)
+            return df
+        df = create_df(data)
+        st.success("### Data Extracted!")
+        st.write(df)
+        
+        if st.button("Upload to Database"):
+            for i,row in df.iterrows():
+                #here %S means string values 
+                sql = """INSERT INTO card_data(company_name,card_holder,designation,mobile_number,email,website,area,city,state,pin_code,image)
+                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"""
+                mycursor.execute(sql, tuple(row))
+                # the connection is not auto committed by default, so we must commit to save our changes
+                mydb.commit()
+            st.success("#### Uploaded to database successfully!")
 
-    # Delete data
-    if st.button("Delete Entry"):
-        id = st.text_input("Enter ID of entry to delete:")
-        if id != "":
-            delete_data(int(id))
-            st.success("Entry deleted successfully!")
+# MODIFY MENU    
+if selected == "Modify":
+    col1,col2,col3 = st.columns([3,3,2])
+    col2.markdown("## Alter or Delete the data here")
+    column1,column2 = st.columns(2,gap="large")
+    try:
+        with column1:
+            mycursor.execute("SELECT card_holder FROM card_data")
+            result = mycursor.fetchall()
+            business_cards = {}
+            for row in result:
+                business_cards[row[0]] = row[0]
+            selected_card = st.selectbox("Select a card holder name to update", list(business_cards.keys()))
+            st.markdown("#### Update or modify any data below")
+            mycursor.execute("select company_name,card_holder,designation,mobile_number,email,website,area,city,state,pin_code from card_data WHERE card_holder=%s",
+                            (selected_card,))
+            result = mycursor.fetchone()
 
-if __name__ == "__main__":
-    create_table()
-    main()
+            # DISPLAYING ALL THE INFORMATIONS
+            company_name = st.text_input("Company_Name", result[0])
+            card_holder = st.text_input("Card_Holder", result[1])
+            designation = st.text_input("Designation", result[2])
+            mobile_number = st.text_input("Mobile_Number", result[3])
+            email = st.text_input("Email", result[4])
+            website = st.text_input("Website", result[5])
+            area = st.text_input("Area", result[6])
+            city = st.text_input("City", result[7])
+            state = st.text_input("State", result[8])
+            pin_code = st.text_input("Pin_Code", result[9])
+
+            if st.button("Commit changes to DB"):
+                # Update the information for the selected business card in the database
+                mycursor.execute("""UPDATE card_data SET company_name=%s,card_holder=%s,designation=%s,mobile_number=%s,email=%s,website=%s,area=%s,city=%s,state=%s,pin_code=%s
+                                    WHERE card_holder=%s""", (company_name,card_holder,designation,mobile_number,email,website,area,city,state,pin_code,selected_card))
+                mydb.commit()
+                st.success("Information updated in database successfully.")
+
+        with column2:
+            mycursor.execute("SELECT card_holder FROM card_data")
+            result = mycursor.fetchall()
+            business_cards = {}
+            for row in result:
+                business_cards[row[0]] = row[0]
+            selected_card = st.selectbox("Select a card holder name to Delete", list(business_cards.keys()))
+            st.write(f"### You have selected :green[**{selected_card}'s**] card to delete")
+            st.write("#### Proceed to delete this card?")
+
+            if st.button("Yes Delete Business Card"):
+                mycursor.execute(f"DELETE FROM card_data WHERE card_holder='{selected_card}'")
+                mydb.commit()
+                st.success("Business card information deleted from database.")
+    except:
+        st.warning("There is no data available in the database")
+    
+    if st.button("View updated data"):
+        mycursor.execute("select company_name,card_holder,designation,mobile_number,email,website,area,city,state,pin_code from card_data")
+        updated_df = pd.DataFrame(mycursor.fetchall(),columns=["Company_Name","Card_Holder","Designation","Mobile_Number","Email","Website","Area","City","State","Pin_Code"])
+        st.write(updated_df)

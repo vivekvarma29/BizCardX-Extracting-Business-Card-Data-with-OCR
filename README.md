@@ -10,7 +10,6 @@ Bizcard Extraction is a Python application built with Streamlit, EasyOCR, OpenCV
 
 # Technologies Used
 - Streamlit
-- Streamlit_lottie
 - Python
 - RegEx 
 - EasyOCR
